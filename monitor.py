@@ -175,10 +175,10 @@ def export(conn):
             writer.writerow(row)
 
 def check(s, conn, oid, kind, uid, key, progress=None):
-    """Full backfill of every accessible page of the *current* pinned root.
+    """Save pinned root, author replies and the precise comments they answer.
 
-    Returns a summary so the UI can distinguish history import from future checks.
-    Existing records are updated, never duplicated.
+    Never save unrelated users. Parent references that are absent from the API
+    are counted as unresolved rather than attributed to a different comment.
     """
     top = pinned(s, oid, kind, key)
     root = rid(top)
@@ -190,25 +190,53 @@ def check(s, conn, oid, kind, uid, key, progress=None):
     existing = {row[0] for row in conn.execute(
         "SELECT id FROM records WHERE root_id=? AND kind='UP主楼中楼'", (root,))}
     store(conn, top, "置顶主评论", root)
+    all_replies = {}
+    author_replies = []
     total = matches = added = 0
     def report(page, seen, page_count):
         if progress:
             progress(page, seen, page_count, matches, added)
     for reply in nested(s, oid, kind, root, progress=report):
         total += 1
+        identifier = rid(reply)
+        if not identifier:
+            continue
+        all_replies[identifier] = reply
         if str(reply.get("mid") or (reply.get("member") or {}).get("mid") or "") == uid:
-            identifier = rid(reply)
-            if identifier:
-                store(conn, reply, "UP主楼中楼", root)
-                matches += 1
-                if identifier not in existing:
-                    existing.add(identifier)
-                    added += 1
+            author_replies.append(reply)
+            matches += 1
+            store(conn, reply, "UP主楼中楼", root)
+            if identifier not in existing:
+                existing.add(identifier)
+                added += 1
+
+    context_ids = set()
+    unresolved = set()
+    # The API's parent field is the actual comment being answered, while root
+    # denotes the thread. The root may itself be another user's original comment.
+    for reply in author_replies:
+        parent = str(reply.get("parent") or root)
+        if parent in ("0", ""):
+            parent = root
+        if parent == rid(reply):
+            unresolved.add(parent)
+            continue
+        if parent == root:
+            context_ids.add(root)
+        elif parent in all_replies:
+            context_ids.add(parent)
+            origin = all_replies[parent]
+            if str(origin.get("mid") or (origin.get("member") or {}).get("mid") or "") != uid:
+                store(conn, origin, "被UP主回复的用户原评论", root)
+        else:
+            # Do not substitute the pinned root for a missing user reply.
+            unresolved.add(parent)
     conn.commit()
     export(conn)
-    log.info("置顶 %s，检查子回复 %d 条，其中 UP 主 %d 条，新保存 %d 条",
-             root, total, matches, added)
-    return {"root": root, "scanned": total, "matched": matches, "added": added}
+    log.info("置顶 %s，扫描 %d 条，UP 主 %d 条，新保存 %d 条，关联原评论 %d 条，未定位原评论 %d 条",
+             root, total, matches, added, len(context_ids), len(unresolved))
+    return {"root": root, "scanned": total, "matched": matches,
+            "added": added, "context": len(context_ids), "unresolved": len(unresolved)}
 
 def main():
     conn = database()
