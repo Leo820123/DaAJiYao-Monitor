@@ -119,7 +119,7 @@ def pinned(s, oid, kind, key):
         raise RuntimeError("接口未明确返回置顶评论，本轮跳过，不把普通热评当作置顶")
     return item
 
-def nested(s, oid, kind, root, progress=None):
+def nested(s, oid, kind, root, progress=None, stop_event=None):
     """Walk every available nested-reply page.
 
     Bilibili may return a sparse page despite page.count indicating more
@@ -133,6 +133,8 @@ def nested(s, oid, kind, root, progress=None):
     duplicate_streak = 0
     MAX_PAGES = 1200
     while page <= MAX_PAGES:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("用户要求停止抓取")
         data = get(s, "https://api.bilibili.com/x/v2/reply/reply",
                    {"oid": oid, "type": kind, "root": root,
                     "pn": page, "ps": page_size})
@@ -169,7 +171,11 @@ def nested(s, oid, kind, root, progress=None):
                         root, page)
             break
         page += 1
-        time.sleep(0.7)
+        if stop_event is not None:
+            if stop_event.wait(0.7):
+                raise InterruptedError("用户要求停止抓取")
+        else:
+            time.sleep(0.7)
     else:
         raise RuntimeError("楼中楼扫描超过安全上限 %d 页，无法确认抓取完整" % MAX_PAGES)
 
@@ -205,7 +211,7 @@ def export(conn):
         for row in conn.execute("SELECT * FROM records ORDER BY posted_at,id"):
             writer.writerow(row)
 
-def check(s, conn, oid, kind, uid, key, progress=None):
+def check(s, conn, oid, kind, uid, key, progress=None, stop_event=None):
     """Save pinned root, author replies and the precise comments they answer.
 
     Never save unrelated users. Parent references that are absent from the API
@@ -232,7 +238,7 @@ def check(s, conn, oid, kind, uid, key, progress=None):
         declared_total = page_count
         if progress:
             progress(page, seen, page_count, matches, added)
-    for reply in nested(s, oid, kind, root, progress=report):
+    for reply in nested(s, oid, kind, root, progress=report, stop_event=stop_event):
         total += 1
         identifier = rid(reply)
         if not identifier:
