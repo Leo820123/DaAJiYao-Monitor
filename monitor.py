@@ -162,7 +162,7 @@ def nested(s, oid, kind, root, progress=None):
         # Read every declared page and probe beyond the boundary to account
         # for count inconsistencies and new posts added during the scan.
         expected_pages = ((total + page_size - 1) // page_size) if total else 0
-        if page >= max(expected_pages, 1) and empty_streak >= 2:
+        if page > expected_pages and empty_streak >= (2 if total and len(seen) < total else 1):
             break
         if page >= max(expected_pages, 1) and duplicate_streak >= 2:
             log.warning("分页连续返回重复ID，停止以防无限循环 root=%s page=%s",
