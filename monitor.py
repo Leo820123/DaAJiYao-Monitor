@@ -224,7 +224,12 @@ def check(s, conn, oid, kind, uid, key, progress=None):
     all_replies = {}
     author_replies = []
     total = matches = added = 0
+    pages_scanned = 0
+    declared_total = None
     def report(page, seen, page_count):
+        nonlocal pages_scanned, declared_total
+        pages_scanned = page
+        declared_total = page_count
         if progress:
             progress(page, seen, page_count, matches, added)
     for reply in nested(s, oid, kind, root, progress=report):
@@ -267,7 +272,8 @@ def check(s, conn, oid, kind, uid, key, progress=None):
     log.info("置顶 %s，扫描 %d 条，UP 主 %d 条，新保存 %d 条，关联原评论 %d 条，未定位原评论 %d 条",
              root, total, matches, added, len(context_ids), len(unresolved))
     return {"root": root, "scanned": total, "matched": matches,
-            "added": added, "context": len(context_ids), "unresolved": len(unresolved)}
+            "added": added, "context": len(context_ids), "unresolved": len(unresolved),
+            "pages": pages_scanned, "declared_total": declared_total}
 
 def main():
     conn = database()
