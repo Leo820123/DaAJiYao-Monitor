@@ -1,2 +1,4 @@
 requests>=2.31,<3
 playwright>=1.50,<2
+pystray>=0.19.5,<1
+Pillow>=10,<13
