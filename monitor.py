@@ -120,28 +120,59 @@ def pinned(s, oid, kind, key):
     return item
 
 def nested(s, oid, kind, root, progress=None):
+    """Walk every available nested-reply page.
+
+    Bilibili may return a sparse page despite page.count indicating more
+    replies. A short page is therefore NOT evidence of the last page.
+    """
     seen = set()
     page = 1
-    while True:
+    page_size = 20
+    total = None
+    empty_streak = 0
+    duplicate_streak = 0
+    MAX_PAGES = 1200
+    while page <= MAX_PAGES:
         data = get(s, "https://api.bilibili.com/x/v2/reply/reply",
-                   {"oid": oid, "type": kind, "root": root, "pn": page, "ps": 20})
+                   {"oid": oid, "type": kind, "root": root,
+                    "pn": page, "ps": page_size})
         batch = data.get("replies") or []
-        if not batch:
-            break
-        added = 0
+        page_info = data.get("page") or {}
+        try:
+            declared = int(page_info["count"]) if page_info.get("count") is not None else None
+            if declared is not None and declared >= 0:
+                total = max(total or 0, declared)
+        except (ValueError, TypeError):
+            pass
+        unique = 0
         for item in batch:
             identifier = rid(item)
             if identifier and identifier not in seen:
                 seen.add(identifier)
-                added += 1
+                unique += 1
                 yield item
-        count = (data.get("page") or {}).get("count")
+        log.info("楼中楼分页 root=%s 页=%d 返回=%d 新ID=%d 累计=%d 声明总量=%s",
+                 root, page, len(batch), unique, len(seen), total)
         if progress:
-            progress(page, len(seen), int(count) if count is not None else None)
-        if not added or (count is not None and len(seen) >= int(count)) or len(batch) < 20:
+            progress(page, len(seen), total)
+        empty_streak = empty_streak + 1 if not batch else 0
+        duplicate_streak = duplicate_streak + 1 if batch and not unique else 0
+
+        # Never infer completion from len(batch) < page_size.
+        # Read every declared page and probe beyond the boundary to account
+        # for count inconsistencies and new posts added during the scan.
+        expected_pages = ((total + page_size - 1) // page_size) if total else 0
+        if page >= max(expected_pages, 1) and empty_streak >= 2:
+            break
+        if page >= max(expected_pages, 1) and duplicate_streak >= 2:
+            log.warning("分页连续返回重复ID，停止以防无限循环 root=%s page=%s",
+                        root, page)
             break
         page += 1
-        time.sleep(1)
+        time.sleep(0.7)
+    else:
+        raise RuntimeError("楼中楼扫描超过安全上限 %d 页，无法确认抓取完整" % MAX_PAGES)
+
 
 def database():
     conn = sqlite3.connect(DB)
