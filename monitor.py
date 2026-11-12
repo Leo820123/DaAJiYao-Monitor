@@ -48,8 +48,8 @@ def browser(pw, wait_for_login=True):
                 viewport={"width": 1250, "height": 850}, locale="zh-CN")
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            print("请在弹出浏览器中登录有充电权限的 B 站账号，确认评论区可见。")
             if wait_for_login:
+                print("请在弹出浏览器中登录有充电权限的 B 站账号，确认评论区可见。")
                 input("登录完成后回到这里按 Enter：")
             return context
         except Exception as exc:
@@ -119,7 +119,7 @@ def pinned(s, oid, kind, key):
         raise RuntimeError("接口未明确返回置顶评论，本轮跳过，不把普通热评当作置顶")
     return item
 
-def nested(s, oid, kind, root):
+def nested(s, oid, kind, root, progress=None):
     seen = set()
     page = 1
     while True:
@@ -136,6 +136,8 @@ def nested(s, oid, kind, root):
                 added += 1
                 yield item
         count = (data.get("page") or {}).get("count")
+        if progress:
+            progress(page, len(seen), int(count) if count is not None else None)
         if not added or (count is not None and len(seen) >= int(count)) or len(batch) < 20:
             break
         page += 1
@@ -172,7 +174,12 @@ def export(conn):
         for row in conn.execute("SELECT * FROM records ORDER BY posted_at,id"):
             writer.writerow(row)
 
-def check(s, conn, oid, kind, uid, key):
+def check(s, conn, oid, kind, uid, key, progress=None):
+    """Full backfill of every accessible page of the *current* pinned root.
+
+    Returns a summary so the UI can distinguish history import from future checks.
+    Existing records are updated, never duplicated.
+    """
     top = pinned(s, oid, kind, key)
     root = rid(top)
     previous = conn.execute("SELECT root_id FROM pin_history ORDER BY id DESC LIMIT 1").fetchone()
@@ -180,16 +187,28 @@ def check(s, conn, oid, kind, uid, key):
         conn.execute("INSERT INTO pin_history(root_id,detected_at) VALUES (?,?)",
                      (root, datetime.now().astimezone().isoformat(timespec="seconds")))
         log.info("已切换置顶评论：%s", root)
+    existing = {row[0] for row in conn.execute(
+        "SELECT id FROM records WHERE root_id=? AND kind='UP主楼中楼'", (root,))}
     store(conn, top, "置顶主评论", root)
-    total = matches = 0
-    for reply in nested(s, oid, kind, root):
+    total = matches = added = 0
+    def report(page, seen, page_count):
+        if progress:
+            progress(page, seen, page_count, matches, added)
+    for reply in nested(s, oid, kind, root, progress=report):
         total += 1
         if str(reply.get("mid") or (reply.get("member") or {}).get("mid") or "") == uid:
-            store(conn, reply, "UP主楼中楼", root)
-            matches += 1
+            identifier = rid(reply)
+            if identifier:
+                store(conn, reply, "UP主楼中楼", root)
+                matches += 1
+                if identifier not in existing:
+                    existing.add(identifier)
+                    added += 1
     conn.commit()
     export(conn)
-    log.info("置顶 %s，检查子回复 %d 条，其中 UP 主 %d 条", root, total, matches)
+    log.info("置顶 %s，检查子回复 %d 条，其中 UP 主 %d 条，新保存 %d 条",
+             root, total, matches, added)
+    return {"root": root, "scanned": total, "matched": matches, "added": added}
 
 def main():
     conn = database()
