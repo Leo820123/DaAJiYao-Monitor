@@ -39,7 +39,7 @@ def get(session, url, params=None):
                 raise
             time.sleep(3 * (attempt + 1))
 
-def browser(pw):
+def browser(pw, wait_for_login=True):
     errors = []
     for channel in ("chrome", "msedge"):
         try:
@@ -49,7 +49,8 @@ def browser(pw):
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
             print("请在弹出浏览器中登录有充电权限的 B 站账号，确认评论区可见。")
-            input("登录完成后回到这里按 Enter：")
+            if wait_for_login:
+                input("登录完成后回到这里按 Enter：")
             return context
         except Exception as exc:
             errors.append("%s: %s" % (channel, exc))
