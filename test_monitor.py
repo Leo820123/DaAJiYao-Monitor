@@ -70,18 +70,50 @@ class HistoryTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT count(*) FROM records").fetchone()[0], 2)
                 conn.close()
 
+    def test_sparse_first_page_does_not_stop_before_newer_replies(self):
+        """Regression: old code stopped if the first page had fewer than 20."""
+        pages = []
+        batch1 = [reply(i, 123, "older") for i in range(1, 11)]
+        batch2 = [reply(i, 888, "newer UP comment") for i in range(11, 26)]
+        def fake_get(_session, _url, params):
+            pn = params["pn"]
+            pages.append(pn)
+            return {"page": {"count": 25},
+                    "replies": {1: batch1, 2: batch2}.get(pn, [])}
+        with patch.object(monitor, "get", side_effect=fake_get), \
+             patch.object(monitor.time, "sleep", return_value=None):
+            items = list(monitor.nested(None, "oid", 17, "root"))
+        self.assertEqual(len(items), 25)
+        self.assertIn("25", [monitor.rid(item) for item in items])
+        self.assertGreaterEqual(len(pages), 3)
+
+    def test_sparse_pages_all_scanned_even_when_first_page_has_one_item(self):
+        pages = []
+        def fake_get(_session, _url, params):
+            pn = params["pn"]
+            pages.append(pn)
+            data = {1: [reply(1, 123, "old")],
+                    2: [reply(2, 888, "newer")],
+                    3: [reply(3, 888, "newest")]}
+            return {"page": {"count": 50}, "replies": data.get(pn, [])}
+        with patch.object(monitor, "get", side_effect=fake_get), \
+             patch.object(monitor.time, "sleep", return_value=None):
+            records = list(monitor.nested(None, "oid", 17, "root"))
+        self.assertEqual([monitor.rid(x) for x in records], ["1","2","3"])
+        self.assertIn(3, pages)
+
     def test_nested_reads_all_pages(self):
         first = [reply(i, 888, "old") for i in range(1, 21)]
         second = [reply(21, 888, "last")]
         pages = []
         def mock_get(_session, _url, params):
             pages.append(params["pn"])
-            return {"page": {"count": 21}, "replies": first if params["pn"] == 1 else second}
+            return {"page": {"count": 21}, "replies": {1: first, 2: second}.get(params["pn"], [])}
         with patch.object(monitor, "get", side_effect=mock_get), \
              patch.object(monitor.time, "sleep", return_value=None):
             result = list(monitor.nested(None, "oid", 17, "root"))
         self.assertEqual(len(result), 21)
-        self.assertEqual(pages, [1, 2])
+        self.assertEqual(pages, [1, 2, 3])
 
 if __name__ == "__main__":
     unittest.main()
