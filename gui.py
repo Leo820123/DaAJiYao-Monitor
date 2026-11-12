@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from monitor import HOME, DB, CSV, URL, metadata, wbi_key, check, make_session, browser
+from monitor import HOME, DB, CSV, URL, metadata, wbi_key, check, make_session, browser, database
 
 CONFIG = HOME / "settings.json"
 DEFAULTS = {"hotkey": "Ctrl+Alt+H", "notifications": False, "start_hidden": False, "interval": 120}
@@ -97,6 +97,7 @@ class MonitorUI:
         self.events = queue.Queue()
         self.stop = threading.Event()
         self.worker = None
+        self.backfill_requested = threading.Event()
         self.hidden = False
         self.popups = []
         self.root = tk.Tk()
@@ -128,6 +129,7 @@ class MonitorUI:
         self.start_button = ttk.Button(actions, text="登录并启动监控", command=self.start_monitoring)
         self.start_button.pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="停止监控", command=self.stop_monitoring).pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="补抓当前置顶的历史回复", command=self.request_backfill).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="刷新记录", command=self.refresh).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="隐藏窗口（老板键）", command=self.hide).pack(side="left")
         ttk.Label(area, textvariable=self.status, foreground="#16608c").pack(anchor="w", pady=3)
@@ -225,10 +227,19 @@ class MonitorUI:
         if self.worker and self.worker.is_alive():
             return
         self.stop.clear()
+        self.backfill_requested.clear()
         self.start_button.configure(state="disabled")
         self.status.set("正在启动登录浏览器，请登录后保持网页可访问……")
         self.worker = threading.Thread(target=self.work, daemon=True)
         self.worker.start()
+
+    def request_backfill(self):
+        if not self.worker or not self.worker.is_alive():
+            self.start_monitoring()
+            self.status.set("首次启动会自动补抓；登录后开始抓取历史")
+        else:
+            self.backfill_requested.set()
+            self.status.set("已安排历史补抓，将在当前检查后执行（不会弹窗）")
 
     def stop_monitoring(self):
         self.stop.set()
@@ -237,7 +248,7 @@ class MonitorUI:
     def work(self):
         conn = None
         try:
-            conn = sqlite3.connect(DB, timeout=30)
+            conn = database()
             with sync_playwright() as pw:
                 ctx = browser(pw, wait_for_login=False)
                 try:
@@ -259,21 +270,39 @@ class MonitorUI:
                 oid, kind, uid, author = info
                 self.events.put(("status", "正在监控 UP 主：" + str(author)))
                 count = 0
+                initial_backfill = True
                 while not self.stop.is_set():
                     try:
-                        old = {row[0] for row in conn.execute("SELECT id FROM records WHERE kind='UP主楼中楼'")}
-                        check(session, conn, oid, kind, uid, key)
-                        new_rows = conn.execute("SELECT id,content FROM records WHERE kind='UP主楼中楼' ORDER BY seen_at DESC").fetchall()
-                        fresh = [(identifier, content) for identifier, content in new_rows if identifier not in old]
-                        root = conn.execute("SELECT root_id FROM pin_history ORDER BY id DESC LIMIT 1").fetchone()
-                        self.events.put(("update", (root[0] if root else "", fresh)))
-                        self.events.put(("status", "最近检查：" + time.strftime("%Y-%m-%d %H:%M:%S") + "；发现 %d 条新回复" % len(fresh)))
+                        historical = initial_backfill or self.backfill_requested.is_set()
+                        self.backfill_requested.clear()
+                        known = {row[0] for row in conn.execute("SELECT id FROM records WHERE kind='UP主楼中楼'")}
+                        if historical:
+                            self.events.put(("status", "正在补抓当前置顶下所有可访问的历史楼中楼，请查看进度……"))
+                        def on_progress(page, scanned, page_count, matched, added):
+                            if historical:
+                                target = str(page_count) if page_count is not None else "未知"
+                                self.events.put(("status", "历史补抓：第 %d 页，已遍历 %d / %s 条楼中楼，匹配 UP 主 %d 条" %
+                                                 (page, scanned, target, matched)))
+                        result = check(session, conn, oid, kind, uid, key, progress=on_progress)
+                        fresh_rows = conn.execute(
+                            "SELECT id,content FROM records WHERE kind='UP主楼中楼' AND root_id=?",
+                            (result["root"],)).fetchall()
+                        fresh = [(identifier, content) for identifier, content in fresh_rows if identifier not in known]
+                        # Historical import is deliberately silent. No old replies are misclassified
+                        # as a newly posted alert, even when the user enabled notifications.
+                        self.events.put(("update", (result["root"], [] if historical else fresh)))
+                        label = "历史补抓完成" if historical else "最近检查"
+                        self.events.put(("status", "%s：遍历 %d 条楼中楼，UP 主 %d 条，本次新增保存 %d 条；%s" %
+                                         (label, result["scanned"], result["matched"], result["added"],
+                                          time.strftime("%Y-%m-%d %H:%M:%S"))))
+                        initial_backfill = False
                         count += 1
                         if count % 30 == 0:
-                            # Refresh signature; the browser session itself is never written to GitHub.
                             key = wbi_key(session)
                     except Exception as exc:
-                        self.events.put(("status", "检查失败（历史仍保留）：" + str(exc)[:150]))
+                        self.events.put(("status", "抓取失败（历史未删除）：" + str(exc)[:170]))
+                    if self.backfill_requested.is_set():
+                        continue
                     self.stop.wait(int(self.cfg["interval"]))
         except Exception as exc:
             self.events.put(("status", "启动失败：" + str(exc)))
