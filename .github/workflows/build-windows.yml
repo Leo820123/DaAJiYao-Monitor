@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'monitor.py'
+      - 'gui.py'
       - '.github/workflows/build-windows.yml'
       - 'requirements.txt'
 jobs:
@@ -20,9 +21,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pyinstaller
       - name: Check Python syntax
-        run: python -m py_compile monitor.py
+        run: python -m py_compile monitor.py gui.py
       - name: Package EXE
-        run: pyinstaller --noconfirm --clean --onefile --console --name DaAJiYaoMonitor --collect-all playwright monitor.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name DaAJiYaoMonitor --collect-all playwright gui.py
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
