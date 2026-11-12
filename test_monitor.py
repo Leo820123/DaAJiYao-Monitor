@@ -32,6 +32,44 @@ class HistoryTests(unittest.TestCase):
                 self.assertTrue((Path(directory) / "export.csv").exists())
                 conn.close()
 
+    def test_up_reply_includes_exact_user_original_and_excludes_unrelated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(monitor, "DB", Path(directory) / "test.sqlite3"), \
+                 patch.object(monitor, "CSV", Path(directory) / "export.csv"):
+                conn = monitor.database()
+                top = reply(100, 999, "pinned question")
+                original = reply(101, 123, "What about tomorrow?")
+                unrelated = reply(102, 234, "unrelated message")
+                author_answer = reply(103, 888, "Watch the volume")
+                author_answer["parent"] = 101
+                batch = [unrelated, author_answer, original]
+                with patch.object(monitor, "pinned", return_value=top), \
+                     patch.object(monitor, "nested", side_effect=lambda *args, **kwargs: iter(batch)):
+                    summary = monitor.check(None, conn, "999", 17, "888", "unused")
+                self.assertEqual(summary["matched"], 1)
+                self.assertEqual(summary["context"], 1)
+                self.assertEqual(summary["unresolved"], 0)
+                stored = dict(conn.execute("SELECT id,kind FROM records"))
+                self.assertEqual(stored["101"], "被UP主回复的用户原评论")
+                self.assertEqual(stored["103"], "UP主楼中楼")
+                self.assertNotIn("102", stored)
+                conn.close()
+
+    def test_missing_parent_is_not_falsely_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(monitor, "DB", Path(directory) / "test.sqlite3"), \
+                 patch.object(monitor, "CSV", Path(directory) / "export.csv"):
+                conn = monitor.database()
+                top = reply(100, 777, "pinned root")
+                answer = reply(103, 888, "reply to missing 999")
+                answer["parent"] = 999
+                with patch.object(monitor, "pinned", return_value=top), \
+                     patch.object(monitor, "nested", side_effect=lambda *args, **kwargs: iter([answer])):
+                    summary = monitor.check(None, conn, "999", 17, "888", "unused")
+                self.assertEqual(summary["unresolved"], 1)
+                self.assertEqual(conn.execute("SELECT count(*) FROM records").fetchone()[0], 2)
+                conn.close()
+
     def test_nested_reads_all_pages(self):
         first = [reply(i, 888, "old") for i in range(1, 21)]
         second = [reply(21, 888, "last")]
