@@ -9,6 +9,8 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
+import pystray
+from PIL import Image, ImageDraw
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from monitor import HOME, DB, CSV, URL, metadata, wbi_key, check, make_session, browser, database
@@ -99,6 +101,8 @@ class MonitorUI:
         self.worker = None
         self.backfill_requested = threading.Event()
         self.hidden = False
+        self.closing = False
+        self.tray_icon = None
         self.popups = []
         self.root = tk.Tk()
         self.root.title("大A纪要 · UP主回复监控")
@@ -112,6 +116,7 @@ class MonitorUI:
         self.hotkey = tk.StringVar(value=str(self.cfg["hotkey"]))
         self.interval = tk.StringVar(value=str(self.cfg["interval"]))
         self.render()
+        self.start_tray()
         self.hotkey_thread = None
         self.install_hotkey()
         self.refresh()
@@ -162,8 +167,31 @@ class MonitorUI:
         self.detail = tk.Text(area, height=5, wrap="word")
         self.detail.pack(fill="x", pady=(6, 4))
         self.detail.configure(state="disabled")
-        ttk.Label(area, text="关闭窗口会隐藏而非退出。结束程序请使用下方“退出程序”按钮。").pack(anchor="w")
-        ttk.Button(area, text="退出程序", command=self.quit).pack(anchor="e", pady=(5,0))
+        ttk.Label(area, text="右上角 × 缩到系统托盘；只有“彻底退出程序”才停止抓取并释放文件。").pack(anchor="w")
+        ttk.Button(area, text="彻底退出程序", command=self.quit).pack(anchor="e", pady=(5,0))
+
+    def start_tray(self):
+        icon_image = Image.new("RGB", (64, 64), (30, 73, 115))
+        draw = ImageDraw.Draw(icon_image)
+        draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(44, 130, 188))
+        draw.text((21, 18), "A", fill="white")
+        self.tray_icon = pystray.Icon(
+            "DaAJiYaoMonitor", icon_image, "大A纪要监控器",
+            menu=pystray.Menu(
+                pystray.MenuItem("显示窗口", lambda icon, item: self.events.put(("show", None)), default=True),
+                pystray.MenuItem("隐藏窗口", lambda icon, item: self.events.put(("hide", None))),
+                pystray.MenuItem("彻底退出", lambda icon, item: self.events.put(("quit", None))),
+            ))
+        self.tray_icon.run_detached()
+
+    def restore(self):
+        if self.closing:
+            return
+        self.hidden = False
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.refresh()
 
     def install_hotkey(self):
         new_key = self.hotkey.get().strip()
@@ -204,6 +232,8 @@ class MonitorUI:
         self.status.set("设置已保存；提醒：" + ("开启" if self.notification.get() else "关闭"))
 
     def hide(self):
+        if self.closing:
+            return
         self.hidden = True
         for popup in self.popups:
             try:
@@ -214,17 +244,15 @@ class MonitorUI:
         self.root.withdraw()
 
     def toggle(self):
+        if self.closing:
+            return
         if self.hidden:
-            self.hidden = False
-            self.root.deiconify()
-            self.root.lift()
-            self.root.focus_force()
-            self.refresh()
+            self.restore()
         else:
             self.hide()
 
     def start_monitoring(self):
-        if self.worker and self.worker.is_alive():
+        if self.closing or (self.worker and self.worker.is_alive()):
             return
         self.stop.clear()
         self.backfill_requested.clear()
@@ -283,7 +311,7 @@ class MonitorUI:
                                 target = str(page_count) if page_count is not None else "未知"
                                 self.events.put(("status", "历史补抓：第 %d 页，已遍历 %d / %s 条楼中楼，匹配 UP 主 %d 条" %
                                                  (page, scanned, target, matched)))
-                        result = check(session, conn, oid, kind, uid, key, progress=on_progress)
+                        result = check(session, conn, oid, kind, uid, key, progress=on_progress, stop_event=self.stop)
                         fresh_rows = conn.execute(
                             "SELECT id,content FROM records WHERE kind='UP主楼中楼' AND root_id=?",
                             (result["root"],)).fetchall()
@@ -300,6 +328,8 @@ class MonitorUI:
                         count += 1
                         if count % 30 == 0:
                             key = wbi_key(session)
+                    except InterruptedError:
+                        break
                     except Exception as exc:
                         self.events.put(("status", "抓取失败（历史未删除）：" + str(exc)[:170]))
                     if self.backfill_requested.is_set():
@@ -318,6 +348,12 @@ class MonitorUI:
                 event, payload = self.events.get_nowait()
                 if event == "boss":
                     self.toggle()
+                elif event == "show":
+                    self.restore()
+                elif event == "hide":
+                    self.hide()
+                elif event == "quit":
+                    self.quit()
                 elif event == "status":
                     self.status.set(payload)
                 elif event == "update":
@@ -383,9 +419,29 @@ class MonitorUI:
         self.detail.configure(state="disabled")
 
     def quit(self):
+        if self.closing:
+            return
+        self.closing = True
         self.stop.set()
+        self.backfill_requested.clear()
+        self.hidden = False
+        self.root.deiconify()
+        self.status.set("正在彻底退出：停止扫描、关闭登录会话并释放数据库……")
+        self.root.update_idletasks()
         if self.hotkey_thread:
             self.hotkey_thread.stop()
+        self.finish_shutdown()
+
+    def finish_shutdown(self):
+        if self.worker is not None and self.worker.is_alive():
+            self.root.after(300, self.finish_shutdown)
+            return
+        if self.hotkey_thread and self.hotkey_thread.is_alive():
+            self.root.after(100, self.finish_shutdown)
+            return
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
         self.root.destroy()
 
 if __name__ == "__main__":
