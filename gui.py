@@ -292,9 +292,10 @@ class MonitorUI:
                         # as a newly posted alert, even when the user enabled notifications.
                         self.events.put(("update", (result["root"], [] if historical else fresh)))
                         label = "历史补抓完成" if historical else "最近检查"
-                        self.events.put(("status", "%s：扫描 %d 条，UP 主回复 %d 条，关联原评论 %d 条，原文缺失 %d 条；新增 %d 条；%s" %
-                                         (label, result["scanned"], result["matched"], result["context"],
-                                          result["unresolved"], result["added"], time.strftime("%Y-%m-%d %H:%M:%S"))))
+                        self.events.put(("status", ("%s：已请求 %d 页，接口总数 %s，实际读取 %d 条；UP 主回复 %d 条，关联原评论 %d 条，缺失 %d 条；新增 %d 条；%s") %
+                                         (label, result["pages"], str(result["declared_total"]), result["scanned"],
+                                          result["matched"], result["context"], result["unresolved"],
+                                          result["added"], time.strftime("%Y-%m-%d %H:%M:%S"))))
                         initial_backfill = False
                         count += 1
                         if count % 30 == 0:
