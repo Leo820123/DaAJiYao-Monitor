@@ -98,6 +98,7 @@ class MonitorUI:
         self.stop = threading.Event()
         self.worker = None
         self.hidden = False
+        self.popups = []
         self.root = tk.Tk()
         self.root.title("大A纪要 · UP主回复监控")
         self.root.geometry("1020x690")
@@ -202,6 +203,12 @@ class MonitorUI:
 
     def hide(self):
         self.hidden = True
+        for popup in self.popups:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+        self.popups.clear()
         self.root.withdraw()
 
     def toggle(self):
@@ -298,6 +305,7 @@ class MonitorUI:
         if self.hidden or not self.notification.get():
             return
         popup = tk.Toplevel(self.root)
+        self.popups.append(popup)
         popup.title("UP 主有新回复")
         popup.geometry("460x180")
         popup.transient(self.root)
