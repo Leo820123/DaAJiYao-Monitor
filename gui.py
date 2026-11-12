@@ -292,9 +292,9 @@ class MonitorUI:
                         # as a newly posted alert, even when the user enabled notifications.
                         self.events.put(("update", (result["root"], [] if historical else fresh)))
                         label = "历史补抓完成" if historical else "最近检查"
-                        self.events.put(("status", "%s：遍历 %d 条楼中楼，UP 主 %d 条，本次新增保存 %d 条；%s" %
-                                         (label, result["scanned"], result["matched"], result["added"],
-                                          time.strftime("%Y-%m-%d %H:%M:%S"))))
+                        self.events.put(("status", "%s：扫描 %d 条，UP 主回复 %d 条，关联原评论 %d 条，原文缺失 %d 条；新增 %d 条；%s" %
+                                         (label, result["scanned"], result["matched"], result["context"],
+                                          result["unresolved"], result["added"], time.strftime("%Y-%m-%d %H:%M:%S"))))
                         initial_backfill = False
                         count += 1
                         if count % 30 == 0:
@@ -349,21 +349,33 @@ class MonitorUI:
             return
         try:
             conn = sqlite3.connect(DB, timeout=2)
-            rows = conn.execute("SELECT id,posted_at,kind,name,content FROM records ORDER BY posted_at DESC,id DESC LIMIT 1000").fetchall()
+            rows = conn.execute("SELECT id,posted_at,kind,name,content,parent_id,root_id FROM records ORDER BY posted_at DESC,id DESC LIMIT 1000").fetchall()
             conn.close()
         except sqlite3.Error:
             return
-        self.record_by_id = {str(r[0]): r[4] for r in rows}
+        self.record_by_id = {str(r[0]): r for r in rows}
         for item in self.table.get_children():
             self.table.delete(item)
-        for item_id, posted, kind, name, content in rows:
+        for item_id, posted, kind, name, content, parent_id, root_id in rows:
             self.table.insert("", "end", iid=str(item_id), values=(posted,kind,name,content[:180]))
 
     def select_row(self, _):
         selected = self.table.selection()
         if not selected:
             return
-        text = self.record_by_id.get(selected[0], "")
+        row = self.record_by_id.get(selected[0])
+        if not row:
+            return
+        item_id, posted, kind, name, content, parent_id, root_id = row
+        text = "%s：%s" % (name, content)
+        if kind == "UP主楼中楼":
+            original = self.record_by_id.get(str(parent_id))
+            if original and str(parent_id) != str(item_id):
+                text = "被回复原评论｜%s：%s\n\nUP 主回复｜%s：%s" % (
+                    original[3], original[4], name, content)
+            else:
+                text = "被回复原评论｜未获取到原文（原评论 ID：%s）\n\nUP 主回复｜%s：%s" % (
+                    parent_id, name, content)
         self.detail.configure(state="normal")
         self.detail.delete("1.0", "end")
         self.detail.insert("1.0", text)
