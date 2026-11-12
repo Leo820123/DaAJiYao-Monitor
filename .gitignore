@@ -1,0 +1,9 @@
+browser_profile/
+history.sqlite3
+up_pinned_history.csv
+monitor.log
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
